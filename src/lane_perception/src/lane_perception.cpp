@@ -20,14 +20,17 @@ void LanePerception::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr 
     std::vector<float> x_list;
     std::vector<float> y_list;
 
-    for (int index = 300; index < 779; index++) {
+    // From -40 To +40
+    for (int index = 380; index < 700; index++) {
         range = scan_msg->ranges[index];
         if (round(range)>perception_distance) {
             continue;
         }
         degree = ((index-180)/4.0) * (3.14159/180);
-        float x = std::cos(degree) * range;
-        float y = std::sin(degree) * range;
+        // +x = front
+        // +y = left 
+        float x = std::sin(degree) * range;
+        float y = -std::cos(degree) * range;
         x_list.push_back(x);
         y_list.push_back(y);
     }
@@ -59,9 +62,8 @@ void LanePerception::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr 
     sensor_msgs::PointCloud2Iterator<float> iter_z(lane_perception_msg, "z");
 
     for (size_t i = 0; i < x_list.size(); ++i) {
-        // x - y reverse
-        *iter_x = y_list[i];
-        *iter_y = -x_list[i];
+        *iter_x = x_list[i];
+        *iter_y = y_list[i];
         *iter_z = 0;
         ++iter_x;
         ++iter_y;
