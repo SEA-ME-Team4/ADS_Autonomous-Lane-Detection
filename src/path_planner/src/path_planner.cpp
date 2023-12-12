@@ -15,20 +15,21 @@ PathPlanner::PathPlanner() : rclcpp::Node("path_planner") {
 
     publisher_ = this->create_publisher<nav_msgs::msg::Path>("/planner/path", 10);
     subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-    "/perception/lane", 10, std::bind(&PathPlanner::scan_callback, this,  std::placeholders::_1));
+    "/perception/lane", 10, std::bind(&PathPlanner::lane_callback, this,  std::placeholders::_1));
     publisher_timer_ = this->create_wall_timer(
+        // Problem with OpenGL when timer set 100ms
         std::chrono::milliseconds(10),
         std::bind(&PathPlanner::publisher_timer_callback, this)
     );
 
     ///////////////////////////////LANE DEBUG///////////////////////////////
+    left_lane_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/planner/left_lane", 10);
+    right_lane_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/planner/right_lane", 10);
     ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-    debug_publisher_1 = this->create_publisher<nav_msgs::msg::Path>("/planner/path_debug1", 10);
-    debug_publisher_2 = this->create_publisher<nav_msgs::msg::Path>("/planner/path_debug2", 10);
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
+}
+
+void PathPlanner::lane_callback(const sensor_msgs::msg::PointCloud2::SharedPtr lane_perception_msg){
+    this->lane_perception_msg = lane_perception_msg;
 }
 
 void PathPlanner::publisher_timer_callback() {
@@ -66,7 +67,10 @@ void PathPlanner::publisher_timer_callback() {
         current_x = current_xy[0];
         current_y = current_xy[1];
         for (size_t j = 0; j < i; ++j) {
-            distance = static_cast<int>(std::sqrt(std::pow((current_x - xy_list[j][0]), 2) + std::pow(current_y - xy_list[j][1], 2)));
+            // Manhattan Distance
+            distance = std::abs(current_x - xy_list[j][0]) + std::abs(current_y - xy_list[j][1]);
+            // Euclidean Distance
+            // distance = static_cast<int>(std::sqrt(std::pow((current_x - xy_list[j][0]), 2) + std::pow(current_y - xy_list[j][1], 2)));
             if (distance < resolution) {
                 graph[i].push_back(j);
                 graph[j].push_back(i);
@@ -77,16 +81,21 @@ void PathPlanner::publisher_timer_callback() {
     // BFS for Making Lanes
     std::vector<bool> visited(length, false);
     std::vector<std::vector<int>> lanes = {};
+    std::vector<int> lane;
+    int lane_count;
+    int current_point;
+    std::vector<int> next_points;
+    int next_point;
     for (int i = 0; i < static_cast<int>(length); ++i) {
         if (!visited[i]) {
             visited[i] = true;
-            std::vector<int> lane = {i};
-            int lane_count = 0;
+            lane = {i};
+            lane_count = 0;
             while (lane_count < static_cast<int>(lane.size())) {
-                int current_point = lane[lane_count];                
-                std::vector<int> next_points = graph[current_point];
+                current_point = lane[lane_count];                
+                next_points = graph[current_point];
                 for (int j = 0; j < static_cast<int>(next_points.size()); ++j) {
-                    int next_point = next_points[j];
+                    next_point = next_points[j];
                     if (!visited[next_point]) {
                         lane.push_back(next_point);
                         visited[next_point] = true;
@@ -102,11 +111,12 @@ void PathPlanner::publisher_timer_callback() {
     std::vector<int> left_lane = {};
     std::vector<int> right_lane = {};
     std::sort(lanes.begin(), lanes.end(), long_length);
+    int lane_y;
     for (int i = 0; i < static_cast<int>(lanes.size()); ++i) {
         // Get longest vector for each Lane
         // Now : Get Longest vector
         // is Better? : Get smallest x value vector considering Noise
-        int lane_y = xy_list[lanes[i][0]][1];
+        lane_y = xy_list[lanes[i][0]][1];
         if ((lane_y > 0) && (left_lane.size()<lanes[i].size())) {
             left_lane = lanes[i];
         }
@@ -115,52 +125,84 @@ void PathPlanner::publisher_timer_callback() {
         }
     }
 
-    // // Occupancy Grid Map
-    // std::vector<std::vector<uint8_t>> occupancy_grid_map(map_size_x, std::vector<uint8_t>(map_size_y, 0));
-    // // Add Lane Information 
-    // for (size_t i = 0; i < lanes.size(); ++i) {
-    //     for (size_t j = 0; j < lanes[i].size(); ++j) {
-            
-    //     }
+    // Path Planning
+    int mid_x;
+    int mid_y;
+    std::vector<std::vector<int>> mid_xy_list;
+    // Find Middle Lane Between two (If Both Lane Detected)
+    if (!right_lane.empty() && !left_lane.empty()) {
+        float interval = (static_cast<float>(right_lane.size())/left_lane.size());
+        float j = 0;
+        int current_left;
+        int current_right;
+        for (int i = 0; i < static_cast<int>(left_lane.size()); i++) {
+            current_left = left_lane[i];
+            current_right = right_lane[int(j)];
+            mid_x = (xy_list[current_right][0] + xy_list[current_left][0]) / 2;
+            mid_y = (xy_list[current_right][1] + xy_list[current_left][1]) / 2;
+            mid_xy_list.push_back({mid_x, mid_y});
+            j += interval;
+        }
+    }
+    // Exception Handling for One Lane Detect Situation
+    else {
+        std::vector<int> only_lane;
+        std::vector<int> offset = {resolution};
+        if (!right_lane.empty()) {
+            only_lane = right_lane;
+            offset.push_back(resolution);
+        }
+        else if (!left_lane.empty()) {
+            only_lane = left_lane;
+            offset.push_back(-resolution);
+        }
+        // Todo : If no Lane Information
+        else {
+            return;
+        }
+        int current_point;
+        for (int i = 0; i < static_cast<int>(only_lane.size()); i++) {
+            current_point = only_lane[i];
+            mid_x = (xy_list[current_point][0] + offset[0]) / 2;
+            mid_y = (xy_list[current_point][1] + offset[1]) / 2;
+            mid_xy_list.push_back({mid_x, mid_y});
+        }
+    }
 
-    //     // int x = 500 - 100*iter_y[i];
-    //     // int y = round(500 - 100*iter_x[i]);
-    //     // occupancy_grid_map[x][y] = 100;
-
-    // }
-
-    // std::array<int, 2> start_point = {500, 500};
-    // std::array<uint8_t, 2> end_point = {0,0};
-    // publisher_->publish(path_msg);
-
+    // Publish Path Message
+    nav_msgs::msg::Path path_msg;
+    path_msg.header = std_msgs::msg::Header();
+    path_msg.header.stamp = rclcpp::Clock().now();
+    path_msg.header.frame_id = "ego_racecar/laser";
+    this->addPose(path_msg, 0.0, 0.0, 0.0);
+    for (int i = 0; i < static_cast<int>(mid_xy_list.size()); ++i) {
+        this->addPose(path_msg, mid_xy_list[i][0], mid_xy_list[i][1], 0.0);
+    }
+    publisher_->publish(path_msg);
 
     ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-    nav_msgs::msg::Path lane_debug1_msg;
-    lane_debug1_msg.header = std_msgs::msg::Header();
-    lane_debug1_msg.header.stamp = rclcpp::Clock().now();
-    lane_debug1_msg.header.frame_id = "ego_racecar/laser";
+    nav_msgs::msg::GridCells left_lane_msg;
+    left_lane_msg.header = std_msgs::msg::Header();
+    left_lane_msg.header.stamp = rclcpp::Clock().now();
+    left_lane_msg.header.frame_id = "ego_racecar/laser";
+    left_lane_msg.cell_width = 0.1;
+    left_lane_msg.cell_height = 0.1;
     for (int i = 0; i < static_cast<int>(left_lane.size()); ++i) {
-        this->addPose(lane_debug1_msg, xy_list[left_lane[i]][0], xy_list[left_lane[i]][1], 0.0);
+        this->addCell(left_lane_msg, xy_list[left_lane[i]][0], xy_list[left_lane[i]][1], 0.0);
     }
-    debug_publisher_1->publish(lane_debug1_msg);
+    left_lane_publisher->publish(left_lane_msg);
 
-    nav_msgs::msg::Path lane_debug2_msg;
-    lane_debug2_msg.header = std_msgs::msg::Header();
-    lane_debug2_msg.header.stamp = rclcpp::Clock().now();
-    lane_debug2_msg.header.frame_id = "ego_racecar/laser";
+    nav_msgs::msg::GridCells right_lane_msg;
+    right_lane_msg.header = std_msgs::msg::Header();
+    right_lane_msg.header.stamp = rclcpp::Clock().now();
+    right_lane_msg.header.frame_id = "ego_racecar/laser";
+    right_lane_msg.cell_width = 0.1;
+    right_lane_msg.cell_height = 0.1;
     for (int i = 0; i < static_cast<int>(right_lane.size()); ++i) {
-        this->addPose(lane_debug2_msg, xy_list[right_lane[i]][0], xy_list[right_lane[i]][1], 0.0);
+        this->addCell(right_lane_msg, xy_list[right_lane[i]][0], xy_list[right_lane[i]][1], 0.0);
     }
-    debug_publisher_2->publish(lane_debug2_msg);
+    right_lane_publisher->publish(right_lane_msg);
     ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-    ///////////////////////////////LANE DEBUG///////////////////////////////
-}
-
-void PathPlanner::scan_callback(const sensor_msgs::msg::PointCloud2::SharedPtr lane_perception_msg){
-    this->lane_perception_msg = lane_perception_msg;
 }
 
 bool PathPlanner::small_x_value(const std::vector<int>& a, const std::vector<int>& b) {
@@ -183,7 +225,18 @@ void PathPlanner::addPose(nav_msgs::msg::Path& path_msg, int x, int y, float the
     pose_stamped.pose.orientation.z = quat.z();
     pose_stamped.pose.orientation.w = quat.w();
 
-    pose_stamped.header.frame_id = "ego_racecar/laser";
-    pose_stamped.header.stamp = rclcpp::Clock().now();
+    // pose_stamped.header.frame_id = "ego_racecar/laser";
+    // pose_stamped.header.stamp = rclcpp::Clock().now();
     path_msg.poses.push_back(pose_stamped);
 }
+
+
+///////////////////////////////LANE DEBUG///////////////////////////////
+void PathPlanner::addCell(nav_msgs::msg::GridCells& grid_cells_msg, int x, int y, int z) {
+    geometry_msgs::msg::Point point;
+    point.x = x / float_resolution;
+    point.y = y / float_resolution;
+    point.z = z / float_resolution;
+    grid_cells_msg.cells.push_back(point);
+}
+///////////////////////////////LANE DEBUG///////////////////////////////
