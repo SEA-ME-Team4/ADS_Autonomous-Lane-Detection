@@ -1,33 +1,44 @@
 #include "lane_perception.h"
-#include <string>
-#include <math.h>
 
 LanePerception::LanePerception() : rclcpp::Node("lane_percetpion") {
     publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/perception/lane", 10);
     subscription_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
     "/scan", 10, std::bind(&LanePerception::scan_callback, this,  std::placeholders::_1));
-    seq = 1;
+    publisher_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(50),
+        std::bind(&LanePerception::publisher_timer_callback, this)
+    );
 }
 
+void LanePerception::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr scan_msg) {
+    this->scan_msg = scan_msg;
+}
 
-void LanePerception::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr scan_msg) const {
+void LanePerception::publisher_timer_callback() {
+    if (!scan_msg) {
+        return;
+    }
     // Left Front Right
     // 1079  540    0
     float range;
     int perception_distance = 5;
+    int degree_resolution = 4;
     float degree;
 
     std::vector<float> x_list;
     std::vector<float> y_list;
 
-    for (int index = 300; index < 779; index++) {
+    // From -40 To +40
+    for (int index = 380; index < 700; index+=degree_resolution) {
         range = scan_msg->ranges[index];
         if (round(range)>perception_distance) {
             continue;
         }
         degree = ((index-180)/4.0) * (3.14159/180);
-        float x = std::cos(degree) * range;
-        float y = std::sin(degree) * range;
+        // +x = front
+        // +y = left 
+        float x = std::sin(degree) * range;
+        float y = -std::cos(degree) * range;
         x_list.push_back(x);
         y_list.push_back(y);
     }
@@ -59,9 +70,8 @@ void LanePerception::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr 
     sensor_msgs::PointCloud2Iterator<float> iter_z(lane_perception_msg, "z");
 
     for (size_t i = 0; i < x_list.size(); ++i) {
-        // x - y reverse
-        *iter_x = y_list[i];
-        *iter_y = -x_list[i];
+        *iter_x = x_list[i];
+        *iter_y = y_list[i];
         *iter_z = 0;
         ++iter_x;
         ++iter_y;
