@@ -18,16 +18,13 @@ from tqdm import tqdm
 
 from evaluate import evaluate
 from unet import UNet
-from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 import matplotlib.pyplot as plt
 
 class TUSimpleDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_path="/content/drive/MyDrive/LaneDetect_UNet/data/TUSimple/train_set", train=True, size=(512, 256)):
+    def __init__(self, dataset_path="./data/TUSimple/train_set", train=True):
         self._dataset_path = dataset_path
         self._mode = "train" if train else "eval"
-        self._image_size = size # w, h
-
 
         if self._mode == "train":
             label_files = [
@@ -99,12 +96,7 @@ class TUSimpleDataset(torch.utils.data.Dataset):
                     lanes_coords.append(lane_coords)
                 self._data.append((image, lanes_coords))
 
-# dir_img = Path('./data/imgs/')
-# dir_mask = Path('./data/masks/')
-# dir_checkpoint = Path('./checkpoints/')
-
-def save_images(epoch, images, masks, predictions, folder="saved_images", n_images=5):
-    """ 이미지와 마스크, 예측을 저장합니다. """
+def save_images(epoch, images, masks, predictions, folder="saved_images", n_images=4):
     os.makedirs(folder, exist_ok=True)
     for i in range(min(n_images, images.size(0))):
         plt.figure(figsize=(10, 10))
@@ -135,17 +127,16 @@ def train_model(
         img_scale: float = 0.5,
         amp: bool = False,
         weight_decay: float = 1e-8,
-        momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
     log_file_path = 'train_log.txt'
     with open(log_file_path, 'w') as log_file:
       log_file.write('Training log\n')
 
-    checkpoint_dir = '/content/drive/MyDrive/LaneDetect_UNet/checkpoints'
+    checkpoint_dir = './model'
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    dataset = TUSimpleDataset(dataset_path="/content/drive/MyDrive/LaneDetect_UNet/data/TUSimple/train_set", train=True)
+    dataset = TUSimpleDataset(dataset_path="./data/TUSimple/train_set", train=True)
 
     # 2. Split into train / validation partitions
     n_val = int(len(dataset) * val_percent)
@@ -170,8 +161,8 @@ def train_model(
     ''')
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.RMSprop(model.parameters(),
-                              lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
+    optimizer = optim.Adam(model.parameters(),
+                              lr=learning_rate, weight_decay=weight_decay, foreach=True)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
@@ -186,15 +177,8 @@ def train_model(
             for batch in train_loader:
                 images, segmentation_masks, _ = batch
 
-                #assert images.shape[1] == model.n_channels, \
-                #    f'Network has been defined with {model.n_channels} input channels, ' \
-                #    f'but loaded images have {images.shape[1]} channels. Please check that ' \
-                #    'the images are loaded correctly.'
-
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
                 segmentation_masks = segmentation_masks.to(device=device, dtype=torch.long)
-
-                #true_masks = true_masks.to(device=device, dtype=torch.long)
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     masks_pred = model(images)
@@ -248,7 +232,7 @@ def train_model(
           save_images(epoch, images, true_masks, predictions)
 
         if save_checkpoint:
-          torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'checkpoint_epoch{epoch}.pth'))
+          torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'model_epoch{epoch}.pth'))
           logging.info(f'Checkpoint {epoch} saved!')
 
 
@@ -276,6 +260,11 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
+    torch.cuda.init()  # Initialize CUDA
+    torch.cuda.empty_cache()  # Clear cache if needed
+    torch.cuda.reset_peak_memory_stats()  # Reset peak memory stats - Potentially not wise to add this.
+    torch.cuda.empty_cache()  # Clear cache if needed
+
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
@@ -289,7 +278,7 @@ if __name__ == '__main__':
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)
-        del state_dict['mask_values']
+        # del state_dict['mask_values']
         model.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 
@@ -321,4 +310,3 @@ if __name__ == '__main__':
             val_percent=args.val / 100,
             amp=args.amp
         )
-
